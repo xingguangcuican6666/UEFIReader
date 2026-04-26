@@ -100,6 +100,40 @@ namespace UEFIReader
             }
         }
 
+        internal string ResolveConflictSafePath(string targetPath, out bool redirected)
+        {
+            if (!File.Exists(targetPath))
+            {
+                redirected = false;
+                return targetPath;
+            }
+
+            redirected = true;
+            string baseDirectory = Path.GetDirectoryName(targetPath);
+            if (string.IsNullOrEmpty(baseDirectory))
+            {
+                throw new InvalidOperationException($"Invalid target path: {targetPath}");
+            }
+
+            string duplicateDirectory = Path.Combine(baseDirectory, "duplicates");
+            if (!Directory.Exists(duplicateDirectory))
+            {
+                _ = Directory.CreateDirectory(duplicateDirectory);
+            }
+
+            string fileName = Path.GetFileName(targetPath);
+            int index = 1;
+            string redirectedPath = Path.Combine(duplicateDirectory, $"{fileName}.{index}");
+            while (File.Exists(redirectedPath))
+            {
+                index++;
+                redirectedPath = Path.Combine(duplicateDirectory, $"{fileName}.{index}");
+            }
+
+            Console.WriteLine($"[Conflict] {targetPath} -> {redirectedPath}");
+            return redirectedPath;
+        }
+
         internal void ExtractDXEs(string Output)
         {
             List<string> dxeLoadList = [];
@@ -189,6 +223,9 @@ namespace UEFIReader
                                        "\r\n" +
                                        "[Binaries.AARCH64]";
 
+                    List<(string Type, string Path)> sectionEntries = [];
+                    bool moduleHasConflict = false;
+
                     foreach (EFISection item in element.SectionElements)
                     {
                         if (item.Type == "UI")
@@ -210,14 +247,24 @@ namespace UEFIReader
 
                         // TODO: Handle when there's more than one PE32/RAW/etc
                         string outputFileName = $"{moduleName}.{extension}";
+                        string destination = ResolveConflictSafePath(Path.Combine(combinedPath, outputFileName), out bool sectionRedirected);
+                        moduleHasConflict |= sectionRedirected;
+                        sectionEntries.Add((type, destination));
+                        File.WriteAllBytes(destination, item.DecompressedImage);
+                    }
 
-                        infoutput += $"\r\n   {type}|{outputFileName}|*";
+                    string infTargetPath = ResolveConflictSafePath(Path.Combine(combinedPath, moduleName + ".inf"), out bool infRedirected);
+                    moduleHasConflict |= infRedirected;
+                    string infDirectory = Path.GetDirectoryName(infTargetPath);
+                    if (string.IsNullOrEmpty(infDirectory))
+                    {
+                        throw new InvalidOperationException($"Invalid INF path: {infTargetPath}");
+                    }
 
-                        if (File.Exists(Path.Combine(combinedPath, outputFileName)))
-                        {
-                            throw new Exception("File Conflict Detected");
-                        }
-                        File.WriteAllBytes(Path.Combine(combinedPath, outputFileName), item.DecompressedImage);
+                    foreach ((string type, string path) in sectionEntries)
+                    {
+                        string entryPath = Path.GetRelativePath(infDirectory, path).Replace('\\', '/');
+                        infoutput += $"\r\n   {type}|{entryPath}|*";
                     }
 
                     infoutput += "\r\n" +
@@ -227,10 +274,16 @@ namespace UEFIReader
                                  "# AUTOGEN ENDS\r\n" +
                                  "# ****************************************************************************\r\n";
 
-                    File.WriteAllText(Path.Combine(combinedPath, moduleName + ".inf"), infoutput);
-
-                    dxeLoadList.Add($"INF {Path.Combine(outputPath, moduleName + ".inf").Replace("\\", "/")}");
-                    dxeIncludeList.Add($"{Path.Combine(outputPath, moduleName + ".inf").Replace("\\", "/")}");
+                    File.WriteAllText(infTargetPath, infoutput);
+                    if (!moduleHasConflict)
+                    {
+                        dxeLoadList.Add($"INF {Path.Combine(outputPath, moduleName + ".inf").Replace("\\", "/")}");
+                        dxeIncludeList.Add($"{Path.Combine(outputPath, moduleName + ".inf").Replace("\\", "/")}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[Conflict] Skipping DXE index entry for {element.Guid.ToString().ToUpper()}");
+                    }
                 }
                 else if (element.SectionElements.Any(x => IsSectionWithUI(x)))
                 {
