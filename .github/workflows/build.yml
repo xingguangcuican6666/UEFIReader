@@ -1,0 +1,39 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore UEFIReader.sln
+
+      - name: Build
+        run: dotnet build UEFIReader.sln --configuration Release --no-restore
+
+      - name: Publish
+        run: dotnet publish UEFIReader/UEFIReader.csproj --configuration Release --no-build --output artifacts/UEFIReader
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: UEFIReader-${{ github.ref_name }}-${{ github.sha }}
+          path: artifacts/UEFIReader
+          if-no-files-found: error
+          retention-days: 14
